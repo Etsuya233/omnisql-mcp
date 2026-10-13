@@ -7,6 +7,8 @@ import {
   getTestQuery,
   parseConnectionId,
   isFileBackedDriver,
+  buildSchemaQuery,
+  buildListSchemasQuery,
 } from '../src/utils.js';
 
 describe('validateQuery', () => {
@@ -259,5 +261,51 @@ describe('getTestQuery', () => {
 
   it('should return default query for unknown driver', () => {
     expect(getTestQuery('unknown')).toContain('SELECT');
+  });
+});
+
+describe('buildSchemaQuery', () => {
+  it('should narrow a table to the schema it names', () => {
+    expect(buildSchemaQuery('mysql', 'orders', 'shop')).toContain("AND TABLE_SCHEMA = 'shop'");
+    expect(buildSchemaQuery('postgresql', 'orders', 'public')).toContain(
+      "AND table_schema = 'public'"
+    );
+  });
+
+  it('should leave the lookup unqualified when no schema is given', () => {
+    expect(buildSchemaQuery('mysql', 'orders')).not.toContain('TABLE_SCHEMA');
+    expect(buildSchemaQuery('postgresql', 'orders')).not.toContain('table_schema =');
+  });
+
+  it('should read another owner through all_tab_columns on Oracle', () => {
+    expect(buildSchemaQuery('oracle', 'orders', 'OTHER')).toContain('all_tab_columns');
+    expect(buildSchemaQuery('oracle', 'orders', 'OTHER')).toContain("AND owner = UPPER('OTHER')");
+    expect(buildSchemaQuery('oracle', 'orders')).toContain('user_tab_columns');
+  });
+
+  it('should ignore a schema for SQLite, which has only one', () => {
+    expect(buildSchemaQuery('sqlite', 'orders', 'main')).toBe('PRAGMA table_info(orders);');
+  });
+
+  it('should refuse an identifier that is not one', () => {
+    expect(() => buildSchemaQuery('mysql', 'orders', "shop' OR '1'='1")).toThrow();
+  });
+});
+
+describe('buildListSchemasQuery', () => {
+  it('should ask the catalogue of each engine', () => {
+    expect(buildListSchemasQuery('mysql')).toContain('information_schema.SCHEMATA');
+    expect(buildListSchemasQuery('postgresql')).toContain('information_schema.schemata');
+    expect(buildListSchemasQuery('mssql')).toContain('sys.schemas');
+    expect(buildListSchemasQuery('oracle')).toContain('all_users');
+  });
+
+  it('should exclude the engine own schemas', () => {
+    expect(buildListSchemasQuery('mysql')).toContain("'performance_schema'");
+    expect(buildListSchemasQuery('postgresql')).toContain("'pg_catalog'");
+  });
+
+  it('should have nothing to ask SQLite', () => {
+    expect(buildListSchemasQuery('sqlite')).toBeNull();
   });
 });

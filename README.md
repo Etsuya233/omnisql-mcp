@@ -32,6 +32,7 @@ Universal database MCP server — give AI assistants read/write access to your d
 - Schema comparison between connections with migration script generation
 - Read-only mode with enforced SELECT-only on `execute_query`
 - Connection whitelist to restrict which databases are accessible
+- Schema browsing over MCP resources, one level at a time, so listing stays cheap on large servers
 - Tool filtering to disable specific operations
 - Query validation to block dangerous operations (DROP DATABASE, TRUNCATE, DELETE/UPDATE without WHERE)
 - Data export to CSV/JSON
@@ -196,6 +197,30 @@ Restrict which workspace connections are visible. Accepts connection IDs or disp
 - `get_database_stats` - Database statistics
 - `append_insight` - Store analysis notes
 - `list_insights` - Retrieve stored notes
+
+## Resource Browsing
+
+The catalogue is also exposed as MCP resources, one level at a time:
+
+| URI | Reads |
+|---|---|
+| `omnisql://connections` | Every connection this server can reach, each with the URI that lists its schemas |
+| `omnisql://<connection>/schemas` | The databases (MySQL) or schemas the connection exposes |
+| `omnisql://<connection>/schemas/<schema>/tables` | The base tables of one database |
+| `omnisql://<connection>/schemas/<schema>/tables/<table>/schema` | The columns, indexes and constraints of one table |
+
+`resources/list` returns `omnisql://connections` and one `/schemas` entry per connection, so listing
+costs no database round trip even against a server holding thousands of tables. The levels below are
+described by `resources/templates/list` and read on demand — one query per read, against the single
+database that read names.
+
+`<connection>` is a connection id; `omnisql://connections` reports the ids and names to use.
+`<schema>` is the database on MySQL and the schema on PostgreSQL, Oracle and SQL Server. SQLite keeps
+every table in one implicit schema, reported as `main`. Each segment is percent-encoded, so names
+with spaces, slashes or non-ASCII characters round-trip.
+
+Reading a table is schema-qualified by construction, so a table that exists in several databases
+resolves to the columns of the database the URI names rather than to the union of all of them.
 
 ## Security
 

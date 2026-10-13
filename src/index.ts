@@ -4,6 +4,7 @@ import {
   CallToolRequestSchema,
   ErrorCode,
   ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
   ListToolsRequestSchema,
   McpError,
   ReadResourceRequestSchema,
@@ -27,6 +28,15 @@ import { sshTunnelManager } from './net/ssh-tunnel.js';
 import { TransactionManager } from './managers/index.js';
 import { buildExplainQuery, parseExplainOutput } from './utils/query-analyzer.js';
 import { compareSchemas, parseTableSchema, generateMigrationScript } from './utils/schema-diff.js';
+import {
+  ResourceTarget,
+  connectionSummary,
+  connectionsUri,
+  parseResourceUri,
+  schemasUri,
+  tableSchemaUri,
+  tablesUri,
+} from './resources.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -269,65 +279,79 @@ class OmniSQLMCPServer {
   }
 
   private setupResourceHandlers() {
-    // List all available database resources (table schemas)
+    // Browsing starts at the connections rather than at the tables below them:
+    // an enumeration of every table in every reachable database is what a
+    // client asks for once, and a catalogue of twenty thousand entries is not
+    // an answer to it. Listing therefore reads no catalogue at all, and each
+    // level below is read on demand.
     this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
       try {
         const connections = await this.getFilteredConnections();
-        const resources: any[] = [];
 
-        for (const connection of connections) {
-          try {
-            const tables = await this.workspaceClient.listTables(connection, undefined, false);
-
-            for (const table of tables) {
-              const tableName = typeof table === 'string' ? table : table.name || table.table_name;
-              if (tableName) {
-                resources.push({
-                  uri: `omnisql://${connection.id}/${tableName}/schema`,
-                  mimeType: 'application/json',
-                  name: `"${tableName}" schema (${connection.name})`,
-                  description: `Schema information for table ${tableName} in ${connection.name}`,
-                });
-              }
-            }
-          } catch (error) {
-            this.log(`Failed to list tables for connection ${connection.name}: ${error}`, 'debug');
-          }
-        }
-
-        return { resources };
+        return {
+          resources: [
+            {
+              uri: connectionsUri(),
+              mimeType: 'application/json',
+              name: 'Database connections',
+              description:
+                'Every connection this server can reach, with the URI that lists its schemas',
+            },
+            ...connections.map((connection) => ({
+              uri: schemasUri(connection.id),
+              mimeType: 'application/json',
+              name: `Schemas of ${connection.name}`,
+              description: `Databases and schemas of ${connection.name}, each with the URI of its tables`,
+            })),
+          ],
+        };
       } catch (error) {
         this.log(`Failed to list resources: ${error}`, 'error');
         return { resources: [] };
       }
     });
 
-    // Get schema information for a specific table
+    this.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+      resourceTemplates: [
+        {
+          uriTemplate: 'omnisql://{connection}/schemas',
+          name: 'Schemas of a connection',
+          description: 'The databases and schemas a connection exposes',
+          mimeType: 'application/json',
+        },
+        {
+          uriTemplate: 'omnisql://{connection}/schemas/{schema}/tables',
+          name: 'Tables of a schema',
+          description: 'The base tables in one database or schema',
+          mimeType: 'application/json',
+        },
+        {
+          uriTemplate: 'omnisql://{connection}/schemas/{schema}/tables/{table}/schema',
+          name: 'Columns of a table',
+          description: 'The columns, indexes and constraints of one table',
+          mimeType: 'application/json',
+        },
+      ],
+    }));
+
     this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+      const uri = request.params.uri;
+      const target = parseResourceUri(uri);
+
+      if (!target) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          'Failed to read resource: Invalid resource URI format'
+        );
+      }
+
       try {
-        const uri = new URL(request.params.uri);
-        const pathParts = uri.pathname.split('/').filter((p) => p);
-
-        if (pathParts.length < 2 || pathParts[pathParts.length - 1] !== 'schema') {
-          throw new Error('Invalid resource URI format');
-        }
-
-        const connectionId = uri.hostname;
-        const tableName = pathParts[pathParts.length - 2];
-
-        const connection = await this.getConnection(connectionId);
-        if (!connection) {
-          throw new Error(`Connection not found: ${connectionId}`);
-        }
-
-        const schema = await this.workspaceClient.getTableSchema(connection, tableName);
-
         return {
           contents: [
             {
-              uri: request.params.uri,
+              uri,
               mimeType: 'application/json',
-              text: JSON.stringify(schema, null, 2),
+              text: JSON.stringify(await this.readResource(target), null, 2),
             },
           ],
         };
@@ -338,6 +362,53 @@ class OmniSQLMCPServer {
         );
       }
     });
+  }
+
+  /**
+   * Read one level of the resource tree. Reading a connection or a table is a
+   * single query against the database that owns it.
+   */
+  private async readResource(target: ResourceTarget): Promise<unknown> {
+    if (target.kind === 'connections') {
+      const connections = await this.getFilteredConnections();
+      return { connections: connections.map(connectionSummary) };
+    }
+
+    const connection = await this.getConnection(target.connection);
+    if (!connection) {
+      throw new Error(`Connection not found: ${target.connection}`);
+    }
+
+    if (target.kind === 'schemas') {
+      const schemas = await this.workspaceClient.listSchemas(connection);
+      return {
+        connection: connectionSummary(connection),
+        schemas: schemas.map((schema) => ({
+          name: schema,
+          tables: tablesUri(connection.id, schema),
+        })),
+      };
+    }
+
+    if (target.kind === 'tables') {
+      const tables = await this.workspaceClient.listTables(connection, target.schema);
+      return {
+        connection: connectionSummary(connection),
+        schema: target.schema,
+        tables: tables
+          .map((table) => ({
+            name: String(table.table_name ?? table.name ?? ''),
+            type: table.table_type,
+          }))
+          .filter((table) => table.name.length > 0)
+          .map((table) => ({
+            ...table,
+            schema: tableSchemaUri(connection.id, target.schema, table.name),
+          })),
+      };
+    }
+
+    return this.workspaceClient.getTableSchema(connection, target.table, target.schema);
   }
 
   private setupToolHandlers() {

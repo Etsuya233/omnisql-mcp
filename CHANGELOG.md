@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Resources are browsed one level at a time.** `resources/list` used to walk every connection and enumerate every table it could reach, which on a server with many connections is thousands of entries built over tens of seconds — most of them the same URI repeated once per database holding a table of that name. Listing now returns `omnisql://connections` plus one `/schemas` entry per connection and reads no catalogue, so it answers in milliseconds regardless of how much is behind it. The levels below are published through `resources/templates/list` — `omnisql://<connection>/schemas`, `…/schemas/<schema>/tables`, `…/schemas/<schema>/tables/<table>/schema` — and each read runs a single query against the database it names. The flat `omnisql://<connection>/<table>/schema` URIs are gone.
+
+### Fixed
+- **A table schema read over resources could merge several databases.** The flat URI carried no database, so `information_schema` was queried by table name alone and matched every database the connection could reach. A table that exists in several databases came back as one column list holding every database's columns, with a duplicated name per extra database. Resource reads now name the database, and `buildSchemaQuery` narrows to it on every supported engine (`all_tab_columns` instead of `user_tab_columns` on Oracle, which cannot see another owner's columns).
+
+### Added
+- `listSchemas` on the workspace client and `buildListSchemasQuery` in `utils`, backed by `information_schema.schemata`, `sys.schemas` or `all_users` depending on the engine. SQLite has no schema catalogue; it reports its one implicit schema, `main`.
+
 ## [2.1.0] - 2026-08-29
 
 First release carrying the connection-handling work that had accumulated on `main`. Notably, `OMNISQL_PROJECT` was documented before it shipped (#30) - it is in this release.

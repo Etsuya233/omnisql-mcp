@@ -21,6 +21,8 @@ import {
   parseVersionFromResult,
   buildSchemaQuery,
   buildListTablesQuery,
+  buildListSchemasQuery,
+  SQLITE_SCHEMA,
 } from './utils.js';
 import { isIamAuthConnection, resolveIamCredentials } from './auth/iam-auth.js';
 import { sshTunnelManager } from './net/ssh-tunnel.js';
@@ -103,8 +105,12 @@ export class WorkspaceClient {
     }
   }
 
-  async getTableSchema(connection: DatabaseConnection, tableName: string): Promise<SchemaInfo> {
-    const schemaQuery = this.buildSchemaQuery(connection.driver, tableName);
+  async getTableSchema(
+    connection: DatabaseConnection,
+    tableName: string,
+    schema?: string
+  ): Promise<SchemaInfo> {
+    const schemaQuery = buildSchemaQuery(connection.driver, tableName, schema);
     const result = await this.executeQuery(connection, schemaQuery);
 
     return this.parseSchemaResult(result, tableName);
@@ -687,10 +693,6 @@ export class WorkspaceClient {
     return parseVersionFromResult(result);
   }
 
-  private buildSchemaQuery(driver: string, tableName: string): string {
-    return buildSchemaQuery(driver, tableName);
-  }
-
   private parseSchemaResult(result: any, tableName: string): SchemaInfo {
     const columns: any[] = [];
 
@@ -790,6 +792,32 @@ export class WorkspaceClient {
         connectionTime: Date.now() - startTime,
         serverVersion: 'Unknown',
       };
+    }
+  }
+
+  /**
+   * List the schemas (databases, on MySQL) a connection exposes.
+   *
+   * SQLite has no schema catalogue, and its tables are reached without one, so
+   * its single implicit schema is named here instead of queried.
+   */
+  async listSchemas(connection: DatabaseConnection): Promise<string[]> {
+    const query = buildListSchemasQuery(connection.driver);
+    if (!query) {
+      return [SQLITE_SCHEMA];
+    }
+
+    try {
+      const result = await this.executeQuery(connection, query);
+      return result.rows
+        .map((row) => String(row[0] ?? '').trim())
+        .filter((name) => name.length > 0);
+    } catch (error) {
+      if (this.debug) {
+        console.error(`Failed to list schemas: ${error}`);
+      }
+      // Return empty array instead of crashing
+      return [];
     }
   }
 

@@ -619,10 +619,15 @@ export function getTestQuery(driver: string): string {
 
 /**
  * Build schema query based on database driver
+ *
+ * A schema narrows the lookup to one catalogue: without it MySQL answers with
+ * every column of that name across every database the user can reach, so the
+ * same table name in two databases produces a doubled column list.
  */
-export function buildSchemaQuery(driver: string, tableName: string): string {
+export function buildSchemaQuery(driver: string, tableName: string, schema?: string): string {
   const driverLower = driver.toLowerCase();
   const safeTableName = sanitizeIdentifier(tableName);
+  const safeSchema = schema ? sanitizeIdentifier(schema) : null;
 
   if (driverLower.includes('postgresql') || driverLower.includes('postgres')) {
     return `
@@ -635,7 +640,7 @@ export function buildSchemaQuery(driver: string, tableName: string): string {
         numeric_precision,
         numeric_scale
       FROM information_schema.columns
-      WHERE table_name = '${safeTableName}'
+      WHERE table_name = '${safeTableName}'${safeSchema ? ` AND table_schema = '${safeSchema}'` : ''}
       ORDER BY ordinal_position;
     `;
   } else if (driverLower.includes('mysql')) {
@@ -651,12 +656,16 @@ export function buildSchemaQuery(driver: string, tableName: string): string {
         COLUMN_KEY as column_key,
         EXTRA as extra
       FROM information_schema.COLUMNS
-      WHERE TABLE_NAME = '${safeTableName}'
+      WHERE TABLE_NAME = '${safeTableName}'${safeSchema ? ` AND TABLE_SCHEMA = '${safeSchema}'` : ''}
       ORDER BY ORDINAL_POSITION;
     `;
   } else if (driverLower.includes('sqlite')) {
+    // SQLite reads the table from its own database, so there is nothing to narrow.
     return `PRAGMA table_info(${safeTableName});`;
   } else if (driverLower.includes('oracle')) {
+    // all_tab_columns rather than user_tab_columns: a schema other than the
+    // login user's is only visible in the ALL_ view.
+    const columns = safeSchema ? 'all_tab_columns' : 'user_tab_columns';
     return `
       SELECT
         column_name,
@@ -666,8 +675,8 @@ export function buildSchemaQuery(driver: string, tableName: string): string {
         data_length,
         data_precision,
         data_scale
-      FROM user_tab_columns
-      WHERE table_name = UPPER('${safeTableName}')
+      FROM ${columns}
+      WHERE table_name = UPPER('${safeTableName}')${safeSchema ? ` AND owner = UPPER('${safeSchema}')` : ''}
       ORDER BY column_id;
     `;
   } else if (driverLower.includes('mssql') || driverLower.includes('sqlserver')) {
@@ -681,7 +690,7 @@ export function buildSchemaQuery(driver: string, tableName: string): string {
         NUMERIC_PRECISION as numeric_precision,
         NUMERIC_SCALE as numeric_scale
       FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_NAME = '${safeTableName}'
+      WHERE TABLE_NAME = '${safeTableName}'${safeSchema ? ` AND TABLE_SCHEMA = '${safeSchema}'` : ''}
       ORDER BY ORDINAL_POSITION;
     `;
   } else {
@@ -693,7 +702,7 @@ export function buildSchemaQuery(driver: string, tableName: string): string {
         is_nullable,
         column_default
       FROM information_schema.columns
-      WHERE table_name = '${safeTableName}';
+      WHERE table_name = '${safeTableName}'${safeSchema ? ` AND table_schema = '${safeSchema}'` : ''};
     `;
   }
 }
@@ -811,6 +820,62 @@ export function buildListTablesQuery(
     query += ` ORDER BY table_schema, table_name;`;
     return query;
   }
+}
+
+/**
+ * SQLite's single schema. Every table of a database file lives in it, and the
+ * `sqlite_master` queries reach them without naming it, so it only has to
+ * exist as a URI segment.
+ */
+export const SQLITE_SCHEMA = 'main';
+
+/**
+ * Build a query listing the schemas a connection exposes.
+ *
+ * MySQL has no schema layer above the database, so its schemas are the
+ * databases the user can reach; the exclusions match `buildListTablesQuery`.
+ * Returns null for drivers with no catalogue to ask: SQLite keeps every table
+ * in the database it was opened on, so the caller answers that one itself.
+ */
+export function buildListSchemasQuery(driver: string): string | null {
+  const driverLower = driver.toLowerCase();
+
+  if (driverLower.includes('sqlite')) {
+    return null;
+  }
+  if (driverLower.includes('postgresql') || driverLower.includes('postgres')) {
+    return `
+      SELECT schema_name
+      FROM information_schema.schemata
+      WHERE schema_name NOT IN ('information_schema', 'pg_catalog')
+      ORDER BY schema_name;
+    `;
+  }
+  if (driverLower.includes('mysql')) {
+    return `
+      SELECT SCHEMA_NAME as schema_name
+      FROM information_schema.SCHEMATA
+      WHERE SCHEMA_NAME NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+      ORDER BY SCHEMA_NAME;
+    `;
+  }
+  if (driverLower.includes('oracle')) {
+    return `SELECT username as schema_name FROM all_users ORDER BY username;`;
+  }
+  if (driverLower.includes('mssql') || driverLower.includes('sqlserver')) {
+    return `
+      SELECT name as schema_name
+      FROM sys.schemas
+      WHERE name NOT IN ('guest', 'INFORMATION_SCHEMA', 'sys')
+      ORDER BY name;
+    `;
+  }
+
+  return `
+    SELECT DISTINCT table_schema as schema_name
+    FROM information_schema.tables
+    ORDER BY table_schema;
+  `;
 }
 
 /**
